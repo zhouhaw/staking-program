@@ -1,6 +1,19 @@
-use solana_program::program_error::ProgramError;
+use solana_program::{
+    instruction::{
+        AccountMeta,
+        Instruction,
+    },
+    program_error::ProgramError,
+    pubkey::Pubkey,
+};
 use std::convert::TryInto;
+use borsh::{
+    BorshSerialize,     
+    BorshDeserialize,
+    BorshSchema,
+};
 
+#[derive(BorshSchema, BorshSerialize, BorshDeserialize)]
 pub enum StakingInstruction {
     /// Token Geyser
     /// A smart-contract based mechanism to distribute tokens over time, inspired loosely by
@@ -21,30 +34,10 @@ pub enum StakingInstruction {
     /// 
     /// 
     /// Accounts excepted: 
-    /// 0. '[signer]' The account of person staking
-    /// 1. '[]' The token program 
-    Stake {
-        amount: u64,
-    }
-}
-
-impl StakingInstruction {
-    pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
-        let (tag, rest) = input.split_first().ok_or(InvalidInstruction)?;
-
-        Ok(math tag {
-            0 => Self::Stake {
-                amount: 
-            }
-        })    
-    }
-
-    fn unpack_amount(input: &[u8]) -> Result<u64, ProgramError> {
-        let amount = input
-            .get(..8)
-            .and_then(|slice| slice.try_into().ok())
-            .map(u64::from_le_bytes)
-            .ok_or(InvalidInstruction)?;
-        Ok(amount) 
-    }
+    /// 0. '[]' token-account 
+    /// 1. '[]' token pubkey
+    Initialize {
+        amount_reward: u16,
+        pool_name: [u8; 32],
+    },
 }

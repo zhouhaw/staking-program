@@ -5,7 +5,7 @@ use solana_program::{
     pubkey::Pubkey,
 };
 
-using crate::processor::Processor
+use crate::processor::Processor;
 
 entrypoint!(process_instruction);
 fn process_instruction(
@@ -13,5 +13,5 @@ fn process_instruction(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    Processor::process(program_id, accounts, instruction_data);
+    Processor::process(program_id, accounts, instruction_data)
 }

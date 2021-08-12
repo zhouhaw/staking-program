@@ -7,31 +7,57 @@ use solana_program::{
     msg,
     pubkey::Pubkey,
 };
-
+use borsh::{
+    BorshDeserialize,
+    BorshSerialize,
+    BorshSchema,
+};
 use crate::instruction::StakingInstruction;
 
 pub struct Processor;
 impl Processor {
-    pun fn process(
+    pub fn process(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        instruction_data: &[8]
+        instruction_data: &[u8],
     ) -> ProgramResult{
-        let instruction = StakingInstruction::unpack(instruction_data)?;
+        let instruction = StakingInstruction::try_from_slice(instruction_data)?;
 
         match instruction {
-            StakingInstruction::Stake { amount } => {
-                msg!("Instruction: Stake");
-                Self::process_stake(accounts, amount, program_id)
+            StakingInstruction::Initialize { 
+                amount_reward,
+                pool_name, 
+            } => {
+                msg!("Instruction: Initialize stake pool");
+                Self::process_initialize(
+                    program_id,
+                    accounts,
+                    amount_reward,
+                    pool_name,
+                )
             }
         }
     }
 
-    fn process_stake(
-        accounts: &[AccountInfo],
-        amount: u64,
+    fn process_initialize(
         program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        amount_reward: u16,
+        pool_name: [u8; 32],
     ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let token_account_info = next_account_info(account_info_iter)?;
+        let token_info = next_account_info(account_info_iter)?;
 
+        msg!(
+            "Token account {} has {} tokens\n
+            Args: amount_reward: {}, pool_name: {:?}",
+            token_account_info.key,
+            token_account_info.lamports(),
+            amount_reward,
+            pool_name,
+        );
+
+        Ok(())
     }
 }

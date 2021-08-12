@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use solana_program::program_error::ProgramError;
 
+#[derive(Error, Debug)]
 pub enum StakingError {
     /// Invalid instruction
     #[error("Invalid instruction")]
