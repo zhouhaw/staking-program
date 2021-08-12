@@ -37,7 +37,7 @@ pub enum StakingInstruction {
     /// 0. '[]' token-account 
     /// 1. '[]' token pubkey
     Initialize {
-        amount_reward: u16,
+        amount_reward: u64,
         pool_name: [u8; 32],
     },
 }

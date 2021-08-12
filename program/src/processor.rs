@@ -2,17 +2,26 @@ use solana_program::{
     account_info::{
         next_account_info,
         AccountInfo
+    }, 
+    entrypoint::ProgramResult, 
+    msg, 
+    program_pack::Pack, 
+    pubkey::Pubkey
+};
+use spl_token::{
+    state::{
+        Account,
     },
-    entrypoint::ProgramResult,
-    msg,
-    pubkey::Pubkey,
 };
 use borsh::{
     BorshDeserialize,
     BorshSerialize,
     BorshSchema,
 };
-use crate::instruction::StakingInstruction;
+use crate::{
+    error::StakingError, 
+    instruction::StakingInstruction
+};
 
 pub struct Processor;
 impl Processor {
@@ -42,18 +51,26 @@ impl Processor {
     fn process_initialize(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        amount_reward: u16,
+        amount_reward: u64,
         pool_name: [u8; 32],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let token_account_info = next_account_info(account_info_iter)?;
+        let token_account = spl_token::state::Account::unpack_unchecked(
+            &token_account_info.data.borrow(),
+        )?;
+
+        if token_account.amount < amount_reward {
+            return Err(StakingError::InitializeNotEnoughTokens.into());
+        }
+
         let token_info = next_account_info(account_info_iter)?;
 
         msg!(
             "Token account {} has {} tokens\n
             Args: amount_reward: {}, pool_name: {:?}",
             token_account_info.key,
-            token_account_info.lamports(),
+            token_account.amount,
             amount_reward,
             pool_name,
         );
