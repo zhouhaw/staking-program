@@ -3,14 +3,23 @@ use solana_program::{
         next_account_info,
         AccountInfo
     }, 
+    program_error::{
+        ProgramError,
+    },
     entrypoint::ProgramResult, 
     msg, 
     program_pack::Pack, 
-    pubkey::Pubkey
+    pubkey::Pubkey,
 };
 use spl_token::{
     state::{
         Account,
+    },
+    instruction::{
+        transfer,
+    },
+    error::{
+        TokenError,
     },
 };
 use borsh::{
@@ -55,14 +64,32 @@ impl Processor {
         pool_name: [u8; 32],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
+
+        let owner_token_account_info = next_account_info(account_info_iter)?;
         let token_account_info = next_account_info(account_info_iter)?;
+
+        if *token_account_info.owner != spl_token::id() {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
         let token_account = spl_token::state::Account::unpack_unchecked(
             &token_account_info.data.borrow(),
         )?;
 
-        if token_account.amount < amount_reward {
-            return Err(StakingError::InitializeNotEnoughTokens.into());
+        Self::validate_owner(
+            &token_account.owner,
+            owner_token_account_info,
+        )?;
+
+        if token_account.is_frozen() {
+            return Err(TokenError::AccountFrozen.into());
         }
+
+        if token_account.amount < amount_reward {
+            return Err(TokenError::InsufficientFunds.into());
+        }
+
+        let pool_token_account_info = next_account_info(account_info_iter)?;
 
         let token_info = next_account_info(account_info_iter)?;
 
@@ -74,6 +101,21 @@ impl Processor {
             amount_reward,
             pool_name,
         );
+
+        Ok(())
+    }
+
+    pub fn validate_owner(
+        expected_owner: &Pubkey,
+        owner_account_info: &AccountInfo,
+    ) -> ProgramResult {
+        if expected_owner != owner_account_info.key {
+            return Err(TokenError::OwnerMismatch.into());
+        }
+
+        if !owner_account_info.is_signer {
+            return Err(ProgramError::MissingRequiredSignature.into());
+        }
 
         Ok(())
     }

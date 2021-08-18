@@ -34,8 +34,11 @@ pub enum StakingInstruction {
     /// 
     /// 
     /// Accounts excepted: 
-    /// 0. '[]' token-account 
-    /// 1. '[]' token pubkey
+    /// 0. '[signer]' owner of the token-account with reward. Initializer
+    /// 1. '[]' token-account with tokens for reward. Tokens will be relocated to the pool token-account
+    /// 2. '[writable]' token-account for the pool. Should be created prior to this instruction and 
+    ///                 owned by this program
+    /// 3. '[]' token
     Initialize {
         amount_reward: u64,
         pool_name: [u8; 32],

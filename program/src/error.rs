@@ -7,9 +7,6 @@ pub enum StakingError {
     /// Invalid instruction
     #[error("Invalid instruction")]
     InvalidInstruction,
-
-    #[error("Initialize: not enough tokens")]
-    InitializeNotEnoughTokens,
 }
 
 impl From<StakingError> for ProgramError {
