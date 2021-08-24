@@ -36,11 +36,17 @@ pub enum StakingInstruction {
     /// Accounts excepted: 
     /// 0. '[signer]' owner of the token-account with reward. Initializer
     /// 1. '[]' token-account with tokens for reward. Tokens will be relocated to the pool token-account
-    /// 2. '[writable]' token-account for the pool. Should be created prior to this instruction and 
+    /// 2. '[]' mint-account 
+    /// 3. '[writable]' token-account for the pool. Should be created prior to this instruction and 
     ///                 owned by this program
-    /// 3. '[]' token
+    /// 4. '[]' this program
+    /// 5. '[]' token
+    /// 6. '[]' rent
+    /// 7. '[]' system-program 
+    /// 8. '[]' token-program
     Initialize {
         amount_reward: u64,
-        pool_name: [u8; 32],
+        pool_name: String,
+        bump_seed: u8,
     },
 }
