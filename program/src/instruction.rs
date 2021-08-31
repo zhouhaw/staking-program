@@ -35,10 +35,9 @@ pub enum StakingInstruction {
     /// 
     /// Accounts excepted: 
     /// 0. '[signer]' owner of the token-account with reward. Initializer
-    /// 1. '[]' token-account with tokens for reward. Tokens will be relocated to the pool token-account
-    /// 2. '[]' mint-account 
-    /// 3. '[writable]' token-account for the pool. Should be created prior to this instruction and 
-    ///                 owned by this program
+    /// 1. '[writable]' token-account with tokens for reward. Tokens will be relocated to the pool token-account
+    /// 2. '[writable]' PDA token-account for the pool. Should be created prior to this instruction 
+    /// 3. '[writable]' PDA for state. Should be created prior to this instruction
     /// 4. '[]' this program
     /// 5. '[]' token
     /// 6. '[]' rent
@@ -46,7 +45,8 @@ pub enum StakingInstruction {
     /// 8. '[]' token-program
     Initialize {
         amount_reward: u64,
-        pool_name: String,
-        bump_seed: u8,
+        pool_name_for_token_pda: String,
+        pool_name_for_state_pda: String,
+        bump_seed: [u8; 2],
     },
 }
