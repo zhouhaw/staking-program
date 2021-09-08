@@ -15,38 +15,49 @@ use borsh::{
 
 #[derive(BorshSchema, BorshSerialize, BorshDeserialize)]
 pub enum StakingInstruction {
-    /// Token Geyser
-    /// A smart-contract based mechanism to distribute tokens over time, inspired loosely by
-    /// Compound and Uniswap.
+    /// Intitializes a new pool 
     ///
-    /// Distribution tokens are added to a locked pool in the contract and become unlocked over time
-    /// according to a once-configurable unlock schedule. Once unlocked, they are available to be
-    /// claimed by users.
+    /// Accounts expected: 
     ///
-    /// A user may deposit tokens to accrue ownership share over the unlocked pool. This owner share
-    /// is a function of the number of tokens deposited as well as the length of time deposited.
-    /// Specifically, a user's share of the currently-unlocked pool equals their "deposit-seconds"
-    /// divided by the global "deposit-seconds". This aligns the new token distribution with long
-    /// term supporters of the project, addressing one of the major drawbacks of simple airdrops.
-    ///
-    /// More background and motivation available at:
-    /// https://github.com/ampleforth/RFCs/blob/master/RFCs/rfc-1.md
-    /// 
-    /// 
-    /// Accounts excepted: 
     /// 0. '[signer]' owner of the token-account with reward. Initializer
     /// 1. '[writable]' token-account with tokens for reward. Tokens will be relocated to the pool token-account
     /// 2. '[writable]' PDA token-account for the pool. Should be created prior to this instruction 
-    /// 3. '[writable]' PDA for state. Should be created prior to this instruction
-    /// 4. '[]' this program
-    /// 5. '[]' token
-    /// 6. '[]' rent
-    /// 7. '[]' system-program 
-    /// 8. '[]' token-program
+    /// 3. '[writable]' PDA for state StakePool. Should be created prior to this instruction
+    /// 4. '[writable]' PDA for vec of pools
+    /// 5. '[]' this program
+    /// 6. '[]' token
+    /// 7. '[]' rent
+    /// 8. '[]' system-program 
+    /// 9. '[]' token-program
     Initialize {
         amount_reward: u64,
-        pool_name_for_token_pda: String,
-        pool_name_for_state_pda: String,
+        pool_name: [u8; 31],
         bump_seed: [u8; 2],
     },
+    /// Deposit staked tokens and collect reward tokens (if any)
+    ///
+    /// Accounts expected:
+    ///
+    /// 0. '[signer]' owner of the token-account with deposit
+    /// 1. '[writable]' token-account with tokens for deposit. Tokens will be relocated to the pool token-account
+    /// 2. '[]' PDA state pool
+    /// 3. '[writable]' PDA token-account for the pool
+    /// 4. '[writable]' PDA for state UserInfo. Should be created prior to this instruction
+    /// 5. '[]' this program
+    /// 6. '[]' rent
+    /// 7. '[]' system-program
+    /// 8. '[]' token-program
+    Deposit {
+        amount: u64,
+    },
+    /// Initialize a PDA for vec of pools
+    ///
+    /// Accounts expected:
+    ///
+    /// 0. '[signer]' payer
+    /// 1. '[writable]' PDA for vec of pools
+    /// 2. '[]' this program
+    /// 3. '[]' rent
+    /// 4. '[]' system-program
+    CreateVecOfPools,
 }
