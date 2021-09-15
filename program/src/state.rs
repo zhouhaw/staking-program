@@ -1,31 +1,25 @@
 use solana_program::{
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    program_memory::sol_memcpy,
-    program_pack::{
-       IsInitialized,
-       Pack,
-       Sealed,
-    },
- };
+   program_pack::{
+      IsInitialized,
+      Sealed,
+   },
+   pubkey::Pubkey,
+   account_info::AccountInfo,
+   clock::Clock,
+};
+use spl_token::state::Account as TokenAccount;
 use arrayref::{
    array_ref,
-   array_refs,
    array_mut_ref,
    mut_array_refs,
 };
 use std::{
-   str::FromStr,
-   collections::BTreeMap,
    error::Error,
 };
 use borsh::{
    BorshDeserialize,
    BorshSerialize,
    BorshSchema,
-};
-use crate::{
-   error::StakingError,
 };
 
 pub const VEC_LEN: usize = 4;
@@ -70,13 +64,19 @@ pub fn pack_into_slice(
    }
 }
  
-pub const STAKE_POOL_LEN: usize = 64;
+pub const STAKE_POOL_LEN: usize = 128;
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, BorshSchema)]
 pub struct StakePool {
-   pub pool_owner: Pubkey,
+   pub owner: Pubkey,
+   pub mint: Pubkey,
    pub is_initialized: u8,
    pub pool_name: [u8; 31],
+   pub last_reward_block: u64,
+   pub start_block: u64,
+   pub end_block: u64,
+   pub reward_per_block: u64,
+   pub accrued_token_per_share: u64,
 }
  
 impl Sealed for StakePool {}
@@ -84,6 +84,71 @@ impl Sealed for StakePool {}
 impl IsInitialized for StakePool {
    fn is_initialized(&self) -> bool {
       self.is_initialized != 0
+   }
+}
+
+impl StakePool {
+   pub fn update_pool(
+      &self,
+      pda_pool_token_account_info: &AccountInfo,
+      pda_pool_token_account: &TokenAccount,
+      clock: &Clock,
+   ) {
+      let current_block = clock.slot;
+      if current_block <= self.last_reward_block {
+         return;
+      }
+
+      let staked_token_supply = pda_pool_token_account.amount;
+      if staked_token_supply == 0 {
+         self.set_last_reward_block(current_block);
+
+         return;
+      }
+
+      let multiplier = self.get_multiplier(self.last_reward_block, current_block);
+      let reward = multiplier * self.reward_per_block;
+      self.increase_accrued_token(reward / staked_token_supply);
+
+      if self.end_block > current_block {
+         self.set_last_reward_block(current_block);
+      } 
+      else {
+         self.set_last_reward_block(self.end_block);
+      }
+      
+      // TODO: add bonus block condition
+   }
+
+   fn get_multiplier(
+      &self,
+      from: u64,
+      to: u64,
+   ) -> u64 {
+      if from < self.start_block {
+         from = self.start_block;
+      }
+      if self.end_block < to {
+         to = self.end_block;
+      }
+
+      // TODO: add bonus logic
+
+      return to - from;
+   }
+
+   fn set_last_reward_block(
+      &self,
+      block: u64,
+   ) {
+      self.last_reward_block = block;
+   }
+
+   fn increase_accrued_token(
+      &self,
+      value: u64,
+   ) {
+      self.accrued_token_per_share += value;
    }
 }
 /* 
@@ -132,6 +197,21 @@ pub struct UserInfo {
    pub token_account_id: Pubkey,
    pub amount: u64,
    pub reward_debt: u64,
+}
+
+impl UserInfo {
+   pub fn add_amount(
+      &self,
+      value: u64,
+   ) {
+      self.amount += value;
+   }
+   pub fn set_reward_debt(
+      &self,
+      value: u64,
+   ) {
+      self.reward_debt = value;
+   }
 }
 
 /* 
