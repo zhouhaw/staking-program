@@ -23,6 +23,9 @@ pub enum StakingError {
     AccuredTokenPerShareOverflow,
     #[error("Operation overflowed")] // 0x7
     Overflow,
+
+    #[error("Pool Owner or pool Mint missmatch")]
+    StakePoolMissmatch,
 }
 
 impl From<TryFromIntError> for StakingError{
