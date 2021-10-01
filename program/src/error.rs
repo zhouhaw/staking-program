@@ -1,18 +1,17 @@
 use std::num::TryFromIntError;
-
+use num_derive::FromPrimitive;
 use thiserror::Error;
+use solana_program::{
+    program_error::{
+        PrintProgramError, 
+        ProgramError
+    },
+    decode_error::DecodeError,
+    msg,
+};
 
-use solana_program::program_error::ProgramError;
-
-#[derive(Error, Debug)]
+#[derive(Error, Debug, FromPrimitive)]
 pub enum StakingError {
-    #[error("Invalid instruction")]
-    InvalidInstruction,
-    #[error("Unable to add new pool to the list")]
-    UnableToAddPool,
-
-    #[error("Operation overflowed")] // 0x2
-    StakedTokenSupplyOverflow,
     #[error("Operation overflowed")] 
     RewardOverflow,
     #[error("Operation overflowed")]
@@ -21,11 +20,38 @@ pub enum StakingError {
     RewardMulPrecisionDivSupplyOverflow,
     #[error("Operation overflowed")]
     AccuredTokenPerShareOverflow,
-    #[error("Operation overflowed")] // 0x7
+    #[error("Pool counter overflow")]
+    PoolCounterOverflow,
+    #[error("Operation overflowed")] 
     Overflow,
+
+    #[error("Invalid instruction")]
+    InvalidInstruction,
+    #[error("Unable to deserializse MasterStaking")]
+    InvalidMasterStaking,
+    #[error("Unable to deserialize UserInfo")]
+    InvalidUserInfo,
+    #[error("Unable to add new pool to the list")]
+    UnableToAddPool,
 
     #[error("Pool Owner or pool Mint missmatch")]
     StakePoolMissmatch,
+    #[error("Pool Token Account missmatch")]
+    PoolTokenAccountMissmatch,
+    #[error("User Info missmatch")]
+    UserInfoMissmatch,
+}
+
+impl PrintProgramError for StakingError {
+    fn print<E>(&self) {
+        msg!(&self.to_string());
+    }
+}
+
+impl<T> DecodeError<T> for StakingError {
+    fn type_of() -> &'static str {
+        "Staking Error"
+    }
 }
 
 impl From<TryFromIntError> for StakingError{

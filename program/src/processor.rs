@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use solana_program::{
     account_info::{
         next_account_info,
@@ -8,7 +7,9 @@ use solana_program::{
         invoke_signed,
         invoke,
     },
-    program_error::ProgramError,
+    program_error::{
+        ProgramError,
+    },
     program_option::COption,
     entrypoint::ProgramResult, 
     program_pack::Pack, 
@@ -30,22 +31,29 @@ use borsh::{
 };
 use crate::{
     state::{
-        VEC_STATE_SPACE,
-        unpack_from_slice,
-        pack_into_slice,
+        MasterStaking,
         StakePool,
         UserInfo,
+        MASTER_STAKING_LEN,
         USER_INFO_LEN,
+    },
+    utils::{
+        validate_pool_token_account,
+        validate_stake_pool,
+        validate_user_state,
+        get_pending,
+        get_reward_debt,
     },
     error::StakingError, 
     instruction::StakingInstruction,
     id as this_program_id,
-    ADD_SEED_LIST_OF_POOLS,
-    BUMP_SEED_LIST_OF_POOLS,
     ADD_SEED_TOKEN_ACCOUNT_AUTHORITY,
     BUMP_SEED_TOKEN_ACCOUNT_AUTHORITY,
+    ADD_SEED_MASTER_STAKING,
+    BUMP_SEED_MASTER_STAKING,
     ADD_SEED_STATE_POOL,
     ADD_SEED_WALLET_POOL,
+    ADD_SEED_STAKED,
 };
 
 pub struct Processor;
@@ -139,11 +147,11 @@ impl Processor {
                     accounts,
                     end_block,
                 )
-            }
-            StakingInstruction::CreateAuthority
-            => {
-                msg!("Instruction: Create authority");
-                Self::process_create_authority(
+            },
+            StakingInstruction::CreateMasterAndAuthority{
+            } => {
+                msg!("Instruction: Create master and authority");
+                Self::process_create_master_and_authority(
                     accounts,
                 )
             },
@@ -167,79 +175,107 @@ impl Processor {
             return Err(ProgramError::MissingRequiredSignature);
         }
         
-        let pda_stake_pool_info = next_account_info(account_info_iter)?; // 1
-        let pda_wallet_for_create_user_info = next_account_info(account_info_iter)?; // 2
+        let pda_master_staking_info = next_account_info(account_info_iter)?; // 1
+        let pda_stake_pool_info = next_account_info(account_info_iter)?; // 2
+        let pda_wallet_for_create_user_info = next_account_info(account_info_iter)?; // 3
 
-        let this_program_info = next_account_info(account_info_iter)?; // 3
+        let this_program_info = next_account_info(account_info_iter)?; // 4
         if *this_program_info.key != this_program_id(){
             return Err(ProgramError::IncorrectProgramId);
         }
 
-        let mint_info = next_account_info(account_info_iter)?; // 4
+        let mint_info = next_account_info(account_info_iter)?; // 5
         let mint = TokenMint::unpack_unchecked(&mint_info.data.borrow())?;
 
-        let rent_info = next_account_info(account_info_iter)?; // 5
+        let rent_info = next_account_info(account_info_iter)?; // 6
         let rent = &Rent::from_account_info(rent_info)?; 
 
-        let system_program_info = next_account_info(account_info_iter)?; // 6
-        let token_program_info = next_account_info(account_info_iter)?; // 7
-        let token_account_info = next_account_info(account_info_iter)?; // 8
+        let system_program_info = next_account_info(account_info_iter)?; // 7
+        let token_program_info = next_account_info(account_info_iter)?; // 8
+        let token_account_info = next_account_info(account_info_iter)?; // 9
 
-        if *token_account_info.owner != spl_token::id() {
-            return Err(ProgramError::IncorrectProgramId);
-        }
-
-        let token_account = TokenAccount::unpack_unchecked(
-            &token_account_info.data.borrow(),
-        )?;
-
-        if token_account.owner != *owner_account_info.key {
-            return Err(TokenError::OwnerMismatch.into());
-        }
-
-        let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 9
-
+        // TODO: Add validate for authority
+        let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 10
+        let pda_pool_token_account_staked_info = next_account_info(account_info_iter)?; // 11
         // TODO: Add validate for token-account
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 10
+        let pda_pool_token_account_reward_info = next_account_info(account_info_iter)?; // 12
+
+        let mut master_staking = MasterStaking::from_account_info(&pda_master_staking_info)?;
+        let pool_index = master_staking.pool_counter;
 
         let minimum_balance_token_acc = rent.minimum_balance(TokenAccount::LEN);
 
+        let (_pda_token_account_staked_pubkey, bump_seed_pda_token_account_staked) = Pubkey::find_program_address(
+            &[&pool_index.to_le_bytes(), ADD_SEED_STAKED.as_bytes()],
+            &this_program_info.key,
+        );
+        let sign_seeds_pda_token_account_staked: &[&[_]] = 
+            &[
+            &pool_index.to_le_bytes(),
+            ADD_SEED_STAKED.as_bytes(),
+            &[bump_seed_pda_token_account_staked],
+            ];
+
+        invoke_signed(
+            &system_instruction::create_account(
+                owner_account_info.key,
+                pda_pool_token_account_staked_info.key,
+                minimum_balance_token_acc,
+                TokenAccount::LEN as u64,
+                &spl_token::id(),
+            ),
+            &[owner_account_info.clone(), pda_pool_token_account_staked_info.clone(), system_program_info.clone()],
+            &[&sign_seeds_pda_token_account_staked],
+        )?;
+
+        invoke_signed(
+            &spl_token::instruction::initialize_account(
+                &spl_token::id(),
+                pda_pool_token_account_staked_info.key,
+                mint_info.key,
+                pda_pool_token_account_authority_info.key,
+            )?,
+            &[
+            pda_pool_token_account_staked_info.clone(), 
+            mint_info.clone(), 
+            pda_pool_token_account_authority_info.clone(),
+            rent_info.clone(),
+            token_program_info.clone(),
+            ],
+            &[&sign_seeds_pda_token_account_staked],
+        )?;
+
         let (_pda_token_account_pubkey, bump_seed_pda_token_account) = Pubkey::find_program_address(
-            &[owner_account_info.key.as_ref(), mint_info.key.as_ref()],
+            &[&pool_index.to_le_bytes()],
             &this_program_info.key
         );
         let sign_seeds_pda_token_account: &[&[_]] = 
             &[
-            owner_account_info.key.as_ref(), 
-            mint_info.key.as_ref(),
+            &pool_index.to_le_bytes(),
             &[bump_seed_pda_token_account],
             ];
 
-        let instruction_create_token_account = system_instruction::create_account(
-            owner_account_info.key,
-            pda_pool_token_account_info.key,
-            minimum_balance_token_acc,
-            TokenAccount::LEN as u64,
-            &spl_token::id(),
-        );
-
         invoke_signed(
-            &instruction_create_token_account,
-            &[owner_account_info.clone(), pda_pool_token_account_info.clone(), system_program_info.clone()],
+            &system_instruction::create_account(
+                owner_account_info.key,
+                pda_pool_token_account_reward_info.key,
+                minimum_balance_token_acc,
+                TokenAccount::LEN as u64,
+                &spl_token::id(),
+            ),
+            &[owner_account_info.clone(), pda_pool_token_account_reward_info.clone(), system_program_info.clone()],
             &[&sign_seeds_pda_token_account],
         )?;                                                             
 
-        let instruction_initialize_account = spl_token::instruction::initialize_account(
-            &spl_token::id(),
-            pda_pool_token_account_info.key,
-            mint_info.key,
-            pda_pool_token_account_authority_info.key,
-        )?;
-
         invoke_signed(
-            &instruction_initialize_account,
+            &spl_token::instruction::initialize_account(
+                &spl_token::id(),
+                pda_pool_token_account_reward_info.key,
+                mint_info.key,
+                pda_pool_token_account_authority_info.key,
+            )?,
             &[
-            pda_pool_token_account_info.clone(), 
+            pda_pool_token_account_reward_info.clone(), 
             mint_info.clone(), 
             pda_pool_token_account_authority_info.clone(),
             rent_info.clone(),
@@ -248,20 +284,18 @@ impl Processor {
             &[&sign_seeds_pda_token_account],
         )?;
 
-        let instruction_transfer_tokens = spl_token::instruction::transfer(
-            &spl_token::id(),
-            token_account_info.key,
-            pda_pool_token_account_info.key,
-            owner_account_info.key,
-            &[owner_account_info.key],
-            reward_amount,
-        )?;
-
         invoke(
-            &instruction_transfer_tokens,
+            &spl_token::instruction::transfer(
+                &spl_token::id(),
+                token_account_info.key,
+                pda_pool_token_account_reward_info.key,
+                owner_account_info.key,
+                &[owner_account_info.key],
+                reward_amount,
+            )?,
             &[
             token_account_info.clone(), 
-            pda_pool_token_account_info.clone(), 
+            pda_pool_token_account_reward_info.clone(), 
             owner_account_info.clone(),
             token_program_info.clone(),
             ],
@@ -270,27 +304,24 @@ impl Processor {
         let min_balance_wallet_pool = rent.minimum_balance(USER_INFO_LEN) * 5; 
 
         let (_pda_wallet_for_create_user_pubkey, bump_seed_wallet_for_create_user) = Pubkey::find_program_address(
-            &[owner_account_info.key.as_ref(), mint_info.key.as_ref(), ADD_SEED_WALLET_POOL.as_bytes()],
+            &[&pool_index.to_le_bytes(), ADD_SEED_WALLET_POOL.as_bytes()],
             &this_program_info.key,
         );
         let sign_seeds_pda_wallet_pool: &[&[_]] = 
             &[
-            owner_account_info.key.as_ref(),
-            mint_info.key.as_ref(),
+            &pool_index.to_le_bytes(),
             ADD_SEED_WALLET_POOL.as_bytes(),
             &[bump_seed_wallet_for_create_user],
             ];
 
-        let instruction_create_account_for_wallet_pool = system_instruction::create_account(
-            owner_account_info.key,
-            pda_wallet_for_create_user_info.key,
-            min_balance_wallet_pool,
-            0,
-            system_program_info.key,
-        );
-
         invoke_signed(
-            &instruction_create_account_for_wallet_pool,
+            &system_instruction::create_account(
+                owner_account_info.key,
+                pda_wallet_for_create_user_info.key,
+                min_balance_wallet_pool,
+                0,
+                system_program_info.key,
+            ),
             &[owner_account_info.clone(), pda_wallet_for_create_user_info.clone(), system_program_info.clone()],
             &[&sign_seeds_pda_wallet_pool],
         )?;
@@ -298,27 +329,24 @@ impl Processor {
         let min_balance_stake_pool = rent.minimum_balance(StakePool::LEN);
 
         let (_pda_state_pool_pubkey, bump_seed_state_pool) = Pubkey::find_program_address(
-            &[owner_account_info.key.as_ref(), mint_info.key.as_ref(), ADD_SEED_STATE_POOL.as_bytes()],
+            &[&pool_index.to_le_bytes(), ADD_SEED_STATE_POOL.as_bytes()],
             &this_program_info.key,
         );
         let sign_seeds_pda_state_pool: &[&[_]] = 
             &[
-            owner_account_info.key.as_ref(), 
-            mint_info.key.as_ref(),
+            &pool_index.to_le_bytes(),
             ADD_SEED_STATE_POOL.as_bytes(),
             &[bump_seed_state_pool]
             ];
 
-        let instruction_create_account_for_stake_pool = system_instruction::create_account(
-            owner_account_info.key,
-            pda_stake_pool_info.key, 
-            min_balance_stake_pool,
-            StakePool::LEN as u64,
-            this_program_info.key,
-        );
-
         invoke_signed( 
-            &instruction_create_account_for_stake_pool, 
+            &system_instruction::create_account(
+                owner_account_info.key,
+                pda_stake_pool_info.key, 
+                min_balance_stake_pool,
+                StakePool::LEN as u64,
+                this_program_info.key,
+            ), 
             &[owner_account_info.clone(), pda_stake_pool_info.clone(), system_program_info.clone()],
             &[&sign_seeds_pda_state_pool],
         )?;
@@ -338,6 +366,7 @@ impl Processor {
 
         let stake_pool = StakePool {
             n_reward_tokens,
+            pool_index,
             owner: *owner_account_info.key,
             mint: *mint_info.key,  
             is_initialized: 1, 
@@ -348,7 +377,7 @@ impl Processor {
             last_reward_block: 0,
             start_block,
             end_block,
-            reward_amount,
+            reward_amount: 0, // TODO: delete this
             reward_per_block,
             accrued_token_per_share: 0,
             pool_name,
@@ -358,6 +387,15 @@ impl Processor {
 
         StakePool::pack(stake_pool, &mut pda_stake_pool_info.data.borrow_mut())
             .expect("Failed to serialize StakePool");
+
+        // debug 
+        let stake_pool_unpacked = StakePool::unpack(&pda_stake_pool_info.data.borrow())
+            .expect("Failed to serialize StakePool");
+        println!("Stake Pool check {:#?}", stake_pool_unpacked);
+        //
+
+        master_staking.increase_counter()?;
+        master_staking.serialize(&mut &mut pda_master_staking_info.data.borrow_mut()[..])?;
         
         Ok(())
     }
@@ -370,47 +408,41 @@ impl Processor {
         
         let owner_token_account_info = next_account_info(account_info_iter)?; // 0
         let token_account_info = next_account_info(account_info_iter)?; // 1
-        
-        if *token_account_info.owner != spl_token::id() {
-            return Err(ProgramError::IncorrectProgramId);
-        }
-        
-        let token_account = TokenAccount::unpack_unchecked(
-            &token_account_info.data.borrow(),
-        )?;
-        
         let mint_info = next_account_info(account_info_iter)?; // 2
+        
         let pda_stake_pool_info = next_account_info(account_info_iter)?; // 3
         let mut stake_pool = StakePool::unpack(&pda_stake_pool_info.data.borrow_mut())
             .expect("Failed to deserialie StakePool");
+        let pool_index = stake_pool.pool_index;
 
         let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 4
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 5
-        let pda_wallet_for_create_user_info = next_account_info(account_info_iter)?; // 6
-        let pda_user_state_info = next_account_info(account_info_iter)?; // 7
+        let pda_pool_token_account_staked_info = next_account_info(account_info_iter)?; // 5
+        let pda_pool_token_account_reward_info = next_account_info(account_info_iter)?; // 6
+        let pda_wallet_for_create_user_info = next_account_info(account_info_iter)?; // 7
+        let pda_user_state_info = next_account_info(account_info_iter)?; // 8
 
-        let pda_pool_token_account = TokenAccount::unpack_unchecked( 
-            &pda_pool_token_account_info.data.borrow(),
+        let pda_pool_token_account_staked = TokenAccount::unpack( 
+            &pda_pool_token_account_staked_info.data.borrow(),
         )?;
  
-        if pda_pool_token_account.owner != *pda_pool_token_account_authority_info.key {
+        if pda_pool_token_account_staked.owner != *pda_pool_token_account_authority_info.key {
             return Err(ProgramError::IllegalOwner);
         }
 
-        let rent_info = next_account_info(account_info_iter)?; // 8
+        let rent_info = next_account_info(account_info_iter)?; // 9
         let rent = &Rent::from_account_info(rent_info)?;
 
-        let clock_program_info = next_account_info(account_info_iter)?; // 9
+        let clock_program_info = next_account_info(account_info_iter)?; // 10
         let clock = &Clock::from_account_info(clock_program_info)?;
 
-        let system_program_info = next_account_info(account_info_iter)?; // 10
-        let token_program_info = next_account_info(account_info_iter)?; // 11
+        let system_program_info = next_account_info(account_info_iter)?; // 11
+        let token_program_info = next_account_info(account_info_iter)?; // 12
         
         if pda_user_state_info.data_is_empty() {
             msg!("Creating account for UserInfo");
 
             let (_pda_wallet_pubkey, bump_seed_wallet) = Pubkey::find_program_address(
-                &[stake_pool.owner.as_ref(), mint_info.key.as_ref(), ADD_SEED_WALLET_POOL.as_bytes()],
+                &[&pool_index.to_le_bytes(), ADD_SEED_WALLET_POOL.as_bytes()],
                 &this_program_id(), 
             );
     
@@ -421,8 +453,7 @@ impl Processor {
             
             let signers_seeds_pda_wallet: &[&[_]] = 
                 &[
-                stake_pool.owner.as_ref(), 
-                mint_info.key.as_ref(), 
+                &pool_index.to_le_bytes(),
                 ADD_SEED_WALLET_POOL.as_bytes(),
                 &[bump_seed_wallet],
                 ];
@@ -435,17 +466,15 @@ impl Processor {
                 ]; 
             
             let min_balance_user_info = rent.minimum_balance(USER_INFO_LEN);
-    
-            let instruction_create_account_for_user_info = system_instruction::create_account(
-                pda_wallet_for_create_user_info.key, // account "from" for transfer instruction must not carry data
-                pda_user_state_info.key,
-                min_balance_user_info,
-                USER_INFO_LEN as u64,
-                &this_program_id(),
-            );
 
             invoke_signed( 
-                &instruction_create_account_for_user_info,
+                &system_instruction::create_account(
+                    pda_wallet_for_create_user_info.key, // account "from" for transfer instruction must not carry data
+                    pda_user_state_info.key,
+                    min_balance_user_info,
+                    USER_INFO_LEN as u64,
+                    &this_program_id(),
+                ),
                 &[pda_wallet_for_create_user_info.clone(), pda_user_state_info.clone(), system_program_info.clone()],
                 &[&signers_seeds_pda_wallet, &signers_seeds_pda_user_state],
             )?;
@@ -458,21 +487,19 @@ impl Processor {
     
             user_data.serialize(&mut &mut pda_user_state_info.data.borrow_mut()[..])?;
         } 
-        
-        let instruction_transfer_tokens_to_pool = spl_token::instruction::transfer(
-            &spl_token::id(),
-            token_account_info.key,
-            pda_pool_token_account_info.key,
-            owner_token_account_info.key,
-            &[owner_token_account_info.key],
-            amount,
-        )?;
 
         invoke(
-            &instruction_transfer_tokens_to_pool,
+            &spl_token::instruction::transfer(
+                &spl_token::id(),
+                token_account_info.key,
+                pda_pool_token_account_staked_info.key,
+                owner_token_account_info.key,
+                &[owner_token_account_info.key],
+                amount,
+            )?, 
             &[
             token_account_info.clone(),
-            pda_pool_token_account_info.clone(),
+            pda_pool_token_account_staked_info.clone(),
             owner_token_account_info.clone(),
             token_program_info.clone()
             ],
@@ -482,12 +509,13 @@ impl Processor {
         // TODO: stakers++
         // TODO: add loop
         stake_pool.update_pool(
-            &pda_pool_token_account,
+            &pda_pool_token_account_staked,
             clock
         )
         .expect("Unable to update pool");  
 
-        let mut user_data = UserInfo::try_from_slice(&pda_user_state_info.data.borrow())?;  
+        let mut user_data = UserInfo::from_account_info(&pda_user_state_info)?; 
+        
         let current_amount = user_data.amount;
 
         user_data.amount = user_data
@@ -512,30 +540,23 @@ impl Processor {
                     &[BUMP_SEED_TOKEN_ACCOUNT_AUTHORITY],
                     ];
 
-                let instruction_transfer_pending_tokens = spl_token::instruction::transfer(
-                    &spl_token::id(),
-                    pda_pool_token_account_info.key,
-                    token_account_info.key,
-                    pda_pool_token_account_authority_info.key,
-                    &[pda_pool_token_account_authority_info.key],
-                    pending,
-                )?;
-
                 invoke_signed(
-                    &instruction_transfer_pending_tokens, 
+                    &spl_token::instruction::transfer(
+                        &spl_token::id(),
+                        pda_pool_token_account_reward_info.key,
+                        token_account_info.key,
+                        pda_pool_token_account_authority_info.key,
+                        &[pda_pool_token_account_authority_info.key],
+                        pending,
+                    )?, 
                     &[
-                    pda_pool_token_account_info.clone(),
+                    pda_pool_token_account_reward_info.clone(),
                     token_account_info.clone(),
                     pda_pool_token_account_authority_info.clone(), 
                     token_program_info.clone(),
                     ],
                     &[&sign_seeds_pda_pool_token_account_authority]
                 )?;
-
-                stake_pool.reward_amount = stake_pool 
-                    .reward_amount
-                    .checked_sub(pending)
-                    .ok_or(StakingError::Overflow)?;
             }
         }
         user_data.set_reward_debt(
@@ -546,7 +567,7 @@ impl Processor {
             )?
         );
 
-        user_data.serialize(&mut &mut pda_user_state_info.data.borrow_mut()[..])?;
+        user_data.serialize(&mut &mut pda_user_state_info.data.borrow_mut()[..])?; 
 
         msg!("stake_pool after deposit is {:#?}", stake_pool);
         StakePool::pack(stake_pool, &mut pda_stake_pool_info.data.borrow_mut())?;
@@ -568,7 +589,7 @@ impl Processor {
         let owner_info = next_account_info(account_info_iter)?; // 0
         let token_account_info = next_account_info(account_info_iter)?; // 1
 
-        let token_account = TokenAccount::unpack_unchecked(
+        let token_account = TokenAccount::unpack(
             &token_account_info.data.borrow(),
         )?;
 
@@ -581,16 +602,17 @@ impl Processor {
 
         let pda_stake_pool_info = next_account_info(account_info_iter)?; // 2
         let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 3
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 4
-        let pda_user_state_info = next_account_info(account_info_iter)?; // 5
+        let pda_pool_token_account_staked_info = next_account_info(account_info_iter)?; // 4
+        let pda_pool_token_account_reward_info = next_account_info(account_info_iter)?; // 5
+        let pda_user_state_info = next_account_info(account_info_iter)?; // 6
 
-        let clock_program_info = next_account_info(account_info_iter)?; // 6
+        let clock_program_info = next_account_info(account_info_iter)?; // 7
         let clock = &Clock::from_account_info(clock_program_info)?;
 
-        let token_program_info = next_account_info(account_info_iter)?; // 7
+        let token_program_info = next_account_info(account_info_iter)?; // 8
 
-        let pda_pool_token_account = TokenAccount::unpack_unchecked( 
-            &pda_pool_token_account_info.data.borrow(),
+        let pda_pool_token_account_staked = TokenAccount::unpack( 
+            &pda_pool_token_account_staked_info.data.borrow(),
         )?;
 
         let sign_seeds_pda_pool_token_account_authority: &[&[_]] = 
@@ -602,13 +624,12 @@ impl Processor {
         let mut stake_pool = StakePool::unpack(&pda_stake_pool_info.data.borrow_mut())
             .expect("Failed to deserialie StakePool");
 
-        let mut user_data = UserInfo::try_from_slice(&pda_user_state_info.data.borrow_mut())
-            .expect("Failed to deserialize UserData");
+        let mut user_data = UserInfo::from_account_info(&pda_user_state_info)?;
         
         assert!(user_data.amount >= amount, "Amount to withdraw too high");
 
         stake_pool.update_pool(
-            &pda_pool_token_account,
+            &pda_pool_token_account_staked,
             &clock,
         )?;
 
@@ -619,20 +640,18 @@ impl Processor {
                 .amount
                 .checked_sub(amount)
                 .ok_or(StakingError::Overflow)?;
-            
-            let instruction_transfer_tokens = spl_token::instruction::transfer(
-                &spl_token::id(),
-                pda_pool_token_account_info.key,
-                token_account_info.key,
-                pda_pool_token_account_authority_info.key,
-                &[pda_pool_token_account_authority_info.key],
-                amount,
-            )?;
 
             invoke_signed(
-                &instruction_transfer_tokens,
+                &spl_token::instruction::transfer(
+                    &spl_token::id(),
+                    pda_pool_token_account_staked_info.key,
+                    token_account_info.key,
+                    pda_pool_token_account_authority_info.key,
+                    &[pda_pool_token_account_authority_info.key],
+                    amount,
+                )?,
                 &[
-                pda_pool_token_account_info.clone(),
+                pda_pool_token_account_staked_info.clone(),
                 token_account_info.clone(),
                 pda_pool_token_account_authority_info.clone(),
                 token_program_info.clone(),
@@ -649,23 +668,19 @@ impl Processor {
         )
         .expect("Unable to get pending value");
         
-        // TODO: Check reward_amount > pending
         // TODO: add loop for reward tokens
             if pending > 0 {
-
-                let instruction_transfer_pending_tokens = spl_token::instruction::transfer(
-                    &spl_token::id(),
-                    pda_pool_token_account_info.key,
-                    token_account_info.key,
-                    pda_pool_token_account_authority_info.key,
-                    &[pda_pool_token_account_authority_info.key],
-                    pending,
-                )?;
-
                 invoke_signed(
-                    &instruction_transfer_pending_tokens, 
+                    &spl_token::instruction::transfer(
+                        &spl_token::id(),
+                        pda_pool_token_account_reward_info.key,
+                        token_account_info.key,
+                        pda_pool_token_account_authority_info.key,
+                        &[pda_pool_token_account_authority_info.key],
+                        pending,
+                    )?, 
                     &[
-                    pda_pool_token_account_info.clone(),
+                    pda_pool_token_account_reward_info.clone(),
                     token_account_info.clone(),
                     pda_pool_token_account_authority_info.clone(), 
                     token_program_info.clone(),
@@ -683,11 +698,6 @@ impl Processor {
             );
 
         user_data.serialize(&mut &mut pda_user_state_info.data.borrow_mut()[..])?;
-
-        stake_pool.reward_amount = stake_pool 
-                .reward_amount
-                .checked_sub(pending)
-                .ok_or(StakingError::Overflow)?;
 
         msg!("stake_pool after deposit is {:#?}", stake_pool);
         StakePool::pack(stake_pool, &mut pda_stake_pool_info.data.borrow_mut())?;
@@ -714,30 +724,29 @@ impl Processor {
         }
 
         let token_account_info = next_account_info(account_info_iter)?; // 1
-        let token_account = TokenAccount::unpack_unchecked(
+        let token_account = TokenAccount::unpack(
             &token_account_info.data.borrow(),
         )?;
         if token_account.owner != *owner_info.key {
             return Err(TokenError::OwnerMismatch.into());
         }
 
-        let pda_stake_pool_info = next_account_info(account_info_iter)?; // 2
-        let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 3
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 4
-        let pda_user_state_info = next_account_info(account_info_iter)?; // 5
+        let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 2
+        let pda_pool_token_account_staked_info = next_account_info(account_info_iter)?; // 3
+        let pda_user_state_info = next_account_info(account_info_iter)?; // 4
+        let pda_stake_pool_info = next_account_info(account_info_iter)?; // 5
         let token_program_info = next_account_info(account_info_iter)?; // 6
 
-        let pda_pool_token_account = TokenAccount::unpack_unchecked( 
-            &pda_pool_token_account_info.data.borrow(),
+        validate_pool_token_account(
+            &pda_pool_token_account_staked_info,
+        )?;
+        validate_user_state(
+            &pda_user_state_info,
+            &pda_stake_pool_info,
+            &token_account_info,
         )?;
 
-        // TODO: maybe need check for reward amount
-        // TODO: maybe stake_pool isn't needed
-        let stake_pool = StakePool::unpack(&pda_stake_pool_info.data.borrow())
-            .expect("Failed to deserialie StakePool");
-
-        let mut user_data = UserInfo::try_from_slice(&pda_user_state_info.data.borrow_mut())
-            .expect("Failed to deserialize UserData");
+        let mut user_data = UserInfo::from_account_info(&pda_user_state_info)?;
 
         let amount_to_transfer = user_data.amount;
 
@@ -754,19 +763,17 @@ impl Processor {
                 &[BUMP_SEED_TOKEN_ACCOUNT_AUTHORITY],
                 ];
 
-            let instruction_transfer_pending_tokens = spl_token::instruction::transfer(
-                &spl_token::id(),
-                pda_pool_token_account_info.key,
-                token_account_info.key,
-                pda_pool_token_account_authority_info.key,
-                &[pda_pool_token_account_authority_info.key],
-                amount_to_transfer,
-            )?;
-
             invoke_signed(
-                &instruction_transfer_pending_tokens, 
+                &spl_token::instruction::transfer(
+                    &spl_token::id(),
+                    pda_pool_token_account_staked_info.key,
+                    token_account_info.key,
+                    pda_pool_token_account_authority_info.key,
+                    &[pda_pool_token_account_authority_info.key],
+                    amount_to_transfer,
+                )?, 
                 &[
-                pda_pool_token_account_info.clone(),
+                pda_pool_token_account_staked_info.clone(),
                 token_account_info.clone(),
                 pda_pool_token_account_authority_info.clone(), 
                 token_program_info.clone(),
@@ -843,38 +850,37 @@ impl Processor {
             mint_info.key,
         )?;
 
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 3
-        let pda_pool_token_account = TokenAccount::unpack_unchecked(
-            &pda_pool_token_account_info.data.borrow(),
+        let pda_pool_token_account_staked_info = next_account_info(account_info_iter)?; // 3
+        let pda_pool_token_account_staked = TokenAccount::unpack(
+            &pda_pool_token_account_staked_info.data.borrow(),
         )?;
 
-        let pda_pool_token_account_authority_pubkey = Pubkey::create_program_address(
-            &[ADD_SEED_TOKEN_ACCOUNT_AUTHORITY.as_bytes(), &[BUMP_SEED_TOKEN_ACCOUNT_AUTHORITY]],
-            &this_program_id(),
+        validate_pool_token_account(
+            &pda_pool_token_account_staked_info,
         )?;
-        if pda_pool_token_account.owner != pda_pool_token_account_authority_pubkey {
-            return Err(TokenError::OwnerMismatch.into());
-        }
-
+        
         let clock_info = next_account_info(account_info_iter)?; // 4
         let clock = &Clock::from_account_info(clock_info)?;
 
         assert!(bonus_start_block < bonus_end_block);
-        assert!(bonus_start_block >= stake_pool.start_block, "Cant set early than start time");
+        assert!(bonus_start_block >= stake_pool.start_block, 
+            "Cant set early than start time");
 
         stake_pool.update_pool(
-            &pda_pool_token_account,
+            &pda_pool_token_account_staked,
             &clock,
         )?;
 
-        assert!(stake_pool.bonus_end_block == COption::None, "Can't start another Bonus time");
+        assert!(stake_pool.bonus_end_block == COption::None, 
+            "Can't start another Bonus time");
 
         let end_block = stake_pool.end_block
             .checked_sub(
                 (bonus_end_block - bonus_start_block) * (bonus_multiplier as u64 - 1))
             .ok_or(StakingError::Overflow)?;
 
-        assert!(end_block > clock.slot && end_block > stake_pool.start_block, "Not enough rewards for Bonus");
+        assert!(end_block > clock.slot && end_block > stake_pool.start_block, 
+            "Not enough rewards for Bonus");
 
         if end_block < bonus_end_block {
             stake_pool.set_bonus_end_block(end_block);
@@ -908,7 +914,11 @@ impl Processor {
         let token_program_info = next_account_info(account_info_iter)?; // 4
 
         let reward_token_account_info = next_account_info(account_info_iter)?; // 5
-        let pda_pool_token_account_info = next_account_info(account_info_iter)?; // 6
+        let pda_pool_token_account_reward_info = next_account_info(account_info_iter)?; // 6
+        
+        validate_pool_token_account(
+            &pda_pool_token_account_reward_info,
+        )?;
 
         let mut stake_pool = StakePool::unpack(&pda_stake_pool_info.data.borrow_mut())
             .expect("Failed to deserialie StakePool");
@@ -929,31 +939,23 @@ impl Processor {
         // TODO: add loop for reward tokens
             let to_transfer = blocks_added * stake_pool.reward_per_block;
 
-            let instruction_transfer_tokens = spl_token::instruction::transfer(
-                &spl_token::id(),
-                reward_token_account_info.key,
-                pda_pool_token_account_info.key,
-                pool_owner_info.key,
-                &[pool_owner_info.key],
-                to_transfer,
-            )?;
-
             invoke(
-                &instruction_transfer_tokens,
+                &spl_token::instruction::transfer(
+                    &spl_token::id(),
+                    reward_token_account_info.key,
+                    pda_pool_token_account_reward_info.key,
+                    pool_owner_info.key,
+                    &[pool_owner_info.key],
+                    to_transfer,
+                )?,
                 &[
                 reward_token_account_info.clone(),
-                pda_pool_token_account_info.clone(),
+                pda_pool_token_account_reward_info.clone(),
                 pool_owner_info.clone(),
                 token_program_info.clone(),
                 ],
             )?;
 
-        stake_pool.set_reward_amount(
-            stake_pool
-            .reward_amount
-            .checked_add(to_transfer)
-            .ok_or(StakingError::Overflow)?
-        );
         stake_pool.set_end_block(end_block);
 
         //debug
@@ -964,7 +966,7 @@ impl Processor {
         Ok(())
     }
 
-    pub fn process_create_authority( 
+    pub fn process_create_master_and_authority( 
         accounts: &[AccountInfo],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -972,16 +974,17 @@ impl Processor {
         let payer_info = next_account_info(account_info_iter)?; // 0
 
         let pda_pool_token_account_authority_info = next_account_info(account_info_iter)?; // 1
+        let pda_master_staking_info = next_account_info(account_info_iter)?; // 2
 
-        let this_program_info = next_account_info(account_info_iter)?; // 2
+        let this_program_info = next_account_info(account_info_iter)?; // 3
         if *this_program_info.key != this_program_id(){
-            return Err(ProgramError::IncorrectProgramId);
+            return Err(ProgramError::IncorrectProgramId); 
         }
 
-        let rent_info = next_account_info(account_info_iter)?; // 3
+        let rent_info = next_account_info(account_info_iter)?; // 4
         let rent = &Rent::from_account_info(rent_info)?;
 
-        let system_program_info = next_account_info(account_info_iter)?; // 4
+        let system_program_info = next_account_info(account_info_iter)?; // 5
 
         let sign_seeds_pda_token_account_authority: &[&[_]] = 
             &[
@@ -1002,68 +1005,35 @@ impl Processor {
             &[payer_info.clone(), pda_pool_token_account_authority_info.clone(), system_program_info.clone()],
             &[&sign_seeds_pda_token_account_authority],
         )?;
+
+        let minimum_balance_master = rent.minimum_balance(MASTER_STAKING_LEN);
+
+        let sign_seeds_pda_master_staking: &[&[_]] = 
+            &[
+            ADD_SEED_MASTER_STAKING.as_bytes(),
+            &[BUMP_SEED_MASTER_STAKING],
+            ];
+        
+        let instruction_create_master_staking = system_instruction::create_account(
+            payer_info.key,
+            pda_master_staking_info.key,
+            minimum_balance_master,
+            MASTER_STAKING_LEN as u64,
+            this_program_info.key,
+        );
+
+        invoke_signed(
+            &instruction_create_master_staking,
+            &[payer_info.clone(), pda_master_staking_info.clone(), system_program_info.clone()],
+            &[&sign_seeds_pda_master_staking],
+        )?;
+
+        let master_staking = MasterStaking {
+            pool_counter: 0,
+        };
+
+        master_staking.serialize(&mut *pda_master_staking_info.data.borrow_mut())?;
  
         Ok(())
     }
-}
-
-pub fn validate_stake_pool(
-    stake_pool: &StakePool,
-    owner_key: &Pubkey,
-    mint_key: &Pubkey,
-) -> ProgramResult {
-    if stake_pool.owner != *owner_key || 
-       stake_pool.mint != *mint_key {
-            return Err(StakingError::StakePoolMissmatch.into());
-    }
-
-    Ok(())
-}
-
-pub fn get_pending(
-    current_amount: u64,
-    accrued_token_per_share: u128,
-    precision_factor_rank: u8,
-    reward_debt: u64,
-) -> Result<u64, StakingError> {
-    let precision_factor = get_precision_factor(precision_factor_rank)?;
-
-    let pending = (current_amount as u128) 
-        .checked_mul(accrued_token_per_share)
-        .ok_or(StakingError::Overflow)?
-        .checked_div(precision_factor as u128)
-        .ok_or(StakingError::Overflow)?
-        .checked_sub(reward_debt as u128)
-        .ok_or(StakingError::Overflow)?;
-    
-    match u64::try_from(pending) {
-        Ok(pending) => Ok(pending),
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub fn get_reward_debt(
-    user_amount: u64,
-    accrued_token_per_share: u128,
-    precision_factor_rank: u8,
-) -> Result<u64, StakingError> {
-    let precision_factor = get_precision_factor(precision_factor_rank)?;
-
-    let reward_debt = (user_amount as u128)
-        .checked_mul(accrued_token_per_share)
-        .ok_or(StakingError::Overflow)?
-        .checked_div(precision_factor as u128)
-        .ok_or(StakingError::Overflow)? as u64;
-
-    Ok(reward_debt)
-}
-
-pub fn get_precision_factor(
-    precision_factor_rank: u8,
-) -> Result<u64, StakingError> {
-    let precision_factor = 10_u64
-        .checked_pow(precision_factor_rank as u32)
-        .ok_or(StakingError::Overflow)?;
-
-    Ok(precision_factor)
 }

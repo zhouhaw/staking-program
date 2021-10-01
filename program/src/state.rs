@@ -4,8 +4,12 @@ use solana_program::{
       Sealed,
       Pack,
    },
+   program_error::{
+      ProgramError,
+      PrintProgramError,
+   },
+   account_info::AccountInfo,
    program_option::COption,
-   program_error::ProgramError,
    entrypoint::ProgramResult,
    pubkey::Pubkey,
    clock::Clock,
@@ -19,19 +23,57 @@ use arrayref::{
    array_mut_ref,
    mut_array_refs,
 };
-use std::error::Error;
 use borsh::{
    BorshDeserialize,
    BorshSerialize,
    BorshSchema,
 };
 use crate::error::StakingError;
-use crate::processor::get_precision_factor;
+use crate::utils::get_precision_factor;
 
+pub const MASTER_STAKING_LEN: usize = 8;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, BorshSchema, BorshSerialize, BorshDeserialize)]
+pub struct MasterStaking {
+   pub pool_counter: u64,
+}
+
+impl MasterStaking {
+   pub fn from_account_info(
+      a: &AccountInfo
+   ) -> Result<MasterStaking, ProgramError> {
+      let master = MasterStaking::try_from_slice(
+         &a.data.borrow_mut(),
+      );
+      let master = match master {
+         Ok(v) => v,
+         Err(_) => {
+            StakingError::InvalidMasterStaking.print::<StakingError>();
+            return Err(StakingError::InvalidMasterStaking.into());
+         },
+      };
+
+      Ok(master)
+   }
+
+   pub fn increase_counter(
+      &mut self,
+   ) -> Result<(), ProgramError> {
+      self.pool_counter = self.pool_counter
+         .checked_add(1)
+         .ok_or(StakingError::PoolCounterOverflow)?;
+
+      Ok(())
+   }
+}
+
+#[repr(C)]
 #[derive(Derivative, Clone, Copy)]
 #[derivative(Debug)]
 pub struct StakePool {
    pub n_reward_tokens: u8, 
+   pub pool_index: u64,
    pub owner: Pubkey, 
    pub mint: Pubkey, 
    pub is_initialized: u8, 
@@ -60,11 +102,12 @@ impl IsInitialized for StakePool {
    }
 }
 impl Pack for StakePool {
-   const LEN: usize = 313;
+   const LEN: usize = 321;
    fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
-      let src = array_ref![src, 0, 313];
+      let src = array_ref![src, 0, 321];
       let (
          n_reward_tokens,
+         pool_index,
          owner, 
          mint, 
          is_initialized, 
@@ -81,9 +124,10 @@ impl Pack for StakePool {
          pool_name,
          project_link,
          theme_id,
-      ) = array_refs![src, 1, 32, 32, 1, 1, 5, 12, 12, 8, 8, 8, 8, 8, 16, 32, 128, 1];
+      ) = array_refs![src, 1, 8, 32, 32, 1, 1, 5, 12, 12, 8, 8, 8, 8, 8, 16, 32, 128, 1];
       Ok(StakePool {
          n_reward_tokens: u8::from_le_bytes(*n_reward_tokens),
+         pool_index: u64::from_le_bytes(*pool_index),
          owner: Pubkey::new_from_array(*owner),
          mint: Pubkey::new_from_array(*mint),
          is_initialized: u8::from_le_bytes(*is_initialized),
@@ -96,16 +140,17 @@ impl Pack for StakePool {
          end_block: u64::from_le_bytes(*end_block),
          reward_amount: u64::from_le_bytes(*reward_amount),
          reward_per_block: u64::from_le_bytes(*reward_per_block),
-         accrued_token_per_share: u128::from_le_bytes(*accrued_token_per_share),
+         accrued_token_per_share: u128::from_le_bytes(*accrued_token_per_share), 
          pool_name: *pool_name,
          project_link: *project_link,
          theme_id: u8::from_le_bytes(*theme_id),
       })
    }
    fn pack_into_slice(&self, dst: &mut [u8]) {
-       let dst = array_mut_ref![dst, 0, 313];
+       let dst = array_mut_ref![dst, 0, 321];
        let (
          n_reward_tokens_dst,
+         pool_index_dst,
          owner_dst, 
          mint_dst, 
          is_initialized_dst, 
@@ -122,9 +167,10 @@ impl Pack for StakePool {
          pool_name_dst,
          project_link_dst,
          theme_id_dst,
-      ) = mut_array_refs![dst, 1, 32, 32, 1, 1, 5, 12, 12, 8, 8, 8, 8, 8, 16, 32, 128, 1];
+      ) = mut_array_refs![dst, 1, 8, 32, 32, 1, 1, 5, 12, 12, 8, 8, 8, 8, 8, 16, 32, 128, 1];
       let &StakePool {
          n_reward_tokens,
+         pool_index,
          ref owner,
          ref mint,
          is_initialized,
@@ -143,6 +189,7 @@ impl Pack for StakePool {
          theme_id,
       } = self;
       *n_reward_tokens_dst = n_reward_tokens.to_le_bytes();
+      *pool_index_dst = pool_index.to_le_bytes();
       owner_dst.copy_from_slice(owner.as_ref());
       mint_dst.copy_from_slice(mint.as_ref());
       *is_initialized_dst = is_initialized.to_le_bytes();
@@ -165,7 +212,7 @@ impl Pack for StakePool {
 impl StakePool {
    pub fn update_pool(
       &mut self,
-      pda_pool_token_account: &TokenAccount,
+      pda_pool_token_account_staked: &TokenAccount,
       clock: &Clock, 
    ) -> ProgramResult {
       let current_block = clock.slot;
@@ -173,12 +220,9 @@ impl StakePool {
          return Ok(());
       }
 
-      let staked_token_supply = pda_pool_token_account
-         .amount
-         .checked_sub(self.reward_amount)
-         .ok_or(StakingError::StakedTokenSupplyOverflow)?;
+      let staked_token_supply = pda_pool_token_account_staked.amount;
 
-      if staked_token_supply == 0 {
+      if staked_token_supply == 0 { 
          self.set_last_reward_block(current_block);
    
          return Ok(());
@@ -190,7 +234,7 @@ impl StakePool {
          .checked_mul(self.reward_per_block)
          .ok_or(StakingError::RewardOverflow)?;
 
-      let precision_factor = crate::processor::get_precision_factor(
+      let precision_factor = get_precision_factor(
          self.precision_factor_rank,
       )?;
 
@@ -309,13 +353,6 @@ impl StakePool {
       self.bonus_end_block = COption::Some(block);
    }
 
-   pub fn set_reward_amount(
-      &mut self,
-      amount: u64,
-   ) {
-      self.reward_amount = amount;
-   }
-
    pub fn update_project_info(
       &mut self,
       pool_name: [u8; 32],
@@ -330,7 +367,8 @@ impl StakePool {
 
 pub const USER_INFO_LEN: usize = 48;
 
-#[derive(Debug, Copy, Clone, BorshSerialize, BorshDeserialize, BorshSchema)]
+#[repr(C)]
+#[derive(Debug, Copy, Clone, BorshSerialize, BorshDeserialize)]
 pub struct UserInfo {
    pub token_account_id: Pubkey,
    pub amount: u64,
@@ -338,6 +376,23 @@ pub struct UserInfo {
 }
 
 impl UserInfo {
+   pub fn from_account_info(
+      a: &AccountInfo
+   ) -> Result<UserInfo, ProgramError> {
+      let user_info = UserInfo::try_from_slice(
+         &a.data.borrow_mut(),
+      );
+      let user_info = match user_info { 
+         Ok(v) => v,
+         Err(_) => {
+            StakingError::InvalidUserInfo.print::<StakingError>();
+            return Err(StakingError::InvalidUserInfo.into());
+         },
+     };
+
+      Ok(user_info)
+   }
+
    pub fn set_reward_debt(
       &mut self,
       value: u64,

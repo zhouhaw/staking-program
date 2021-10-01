@@ -4819,6 +4819,8 @@ dependencies = [
  "assert_matches",
  "borsh",
  "derivative",
+ "num-derive",
+ "num-traits",
  "solana-program",
  "solana-program-test",
  "solana-sdk",
